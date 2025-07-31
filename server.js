@@ -6,6 +6,26 @@ const app = express();
 const PORT = 3000;
 const TMDB_API_KEY = 'ea97a714a43a0e3481592c37d2c7178a';
 
+app.use(cors());
+
+// Retry helper for GET requests that handles 403 with backoff
+async function axiosGetWithRetry(url, options = {}, retries = 3) {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      return await axios.get(url, options);
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 403 && attempt < retries - 1) {
+        const delay = 1000 * 2 ** attempt;
+        console.warn(`⚠️ 403 Forbidden from ${url}, retrying in ${delay}ms (attempt ${attempt + 1})`);
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 // === 1. Your original subjectId extractor ===
 function extractSubjectId(html, movieTitle) {
   const regex = new RegExp(`"(\\d{16,})",\\s*"[^"]*",\\s*"${movieTitle.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}"`, 'i');
@@ -61,7 +81,7 @@ app.get('/movie/:tmdbId', async (req, res) => {
     const searchUrl = `https://moviebox.ph/web/searchResult?keyword=${encodeURIComponent(searchKeyword)}`;
     console.log('🌐 Search URL:', searchUrl);
 
-    const searchResp = await axios.get(searchUrl, {
+    const searchResp = await axiosGetWithRetry(searchUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
     });
 
@@ -78,21 +98,22 @@ app.get('/movie/:tmdbId', async (req, res) => {
     console.log('🔗 detailsUrl:', detailsUrl);
 
     const downloadUrl = `https://moviebox.ph/wefeed-h5-bff/web/subject/download?subjectId=${subjectId}&se=0&ep=0`;
-    const downloadResp = await axios.get(downloadUrl, {
+    const downloadResp = await axiosGetWithRetry(downloadUrl, {
       headers: {
         'accept': 'application/json',
         'referer': detailsUrl,
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
         'x-client-info': JSON.stringify({ timezone: 'Africa/Lagos' }),
         'x-source': 'h5',
-        'cookie': [
-          '_ga=GA1.1.2113914.1736365446',
-          'account=6328836939160473392|0|H5|1744461404|',
-          '_ym_uid=1744461405935706898',
-          '_ym_d=1744461405',
-          'i18n_lang=en',
-          '_ga_LF2XQTEPMF=GS2.1.s1751456194$o64$g1$t1751456489$j37$l0$h0'
-        ].join('; ')
+        // Remove or update cookie header as needed:
+        // 'cookie': [
+        //   '_ga=GA1.1.2113914.1736365446',
+        //   'account=6328836939160473392|0|H5|1744461404|',
+        //   '_ym_uid=1744461405935706898',
+        //   '_ym_d=1744461405',
+        //   'i18n_lang=en',
+        //   '_ga_LF2XQTEPMF=GS2.1.s1751456194$o64$g1$t1751456489$j37$l0$h0'
+        // ].join('; ')
       }
     });
 
@@ -126,7 +147,7 @@ app.get('/tv/:tmdbId/:season/:episode', async (req, res) => {
 
     const searchKeyword = `${title} ${year}`;
     const searchUrl = `https://moviebox.ph/web/searchResult?keyword=${encodeURIComponent(searchKeyword)}`;
-    const searchResp = await axios.get(searchUrl, {
+    const searchResp = await axiosGetWithRetry(searchUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
     });
 
@@ -138,21 +159,22 @@ app.get('/tv/:tmdbId/:season/:episode', async (req, res) => {
     const detailsUrl = detailPath ? `https://moviebox.ph/movies/${detailPath}?id=${subjectId}` : null;
 
     const downloadUrl = `https://moviebox.ph/wefeed-h5-bff/web/subject/download?subjectId=${subjectId}&se=${season}&ep=${episode}`;
-    const downloadResp = await axios.get(downloadUrl, {
+    const downloadResp = await axiosGetWithRetry(downloadUrl, {
       headers: {
         'accept': 'application/json',
         'referer': detailsUrl,
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
         'x-client-info': JSON.stringify({ timezone: 'Africa/Lagos' }),
         'x-source': 'h5',
-        'cookie': [
-          '_ga=GA1.1.2113914.1736365446',
-          'account=6328836939160473392|0|H5|1744461404|',
-          '_ym_uid=1744461405935706898',
-          '_ym_d=1744461405',
-          'i18n_lang=en',
-          '_ga_LF2XQTEPMF=GS2.1.s1751456194$o64$g1$t1751456489$j37$l0$h0'
-        ].join('; ')
+        // Remove or update cookie header as needed:
+        // 'cookie': [
+        //   '_ga=GA1.1.2113914.1736365446',
+        //   'account=6328836939160473392|0|H5|1744461404|',
+        //   '_ym_uid=1744461405935706898',
+        //   '_ym_d=1744461405',
+        //   'i18n_lang=en',
+        //   '_ga_LF2XQTEPMF=GS2.1.s1751456194$o64$g1$t1751456489$j37$l0$h0'
+        // ].join('; ')
       }
     });
 
