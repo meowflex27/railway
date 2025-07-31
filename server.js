@@ -8,16 +8,17 @@ const TMDB_API_KEY = 'ea97a714a43a0e3481592c37d2c7178a';
 
 app.use(cors());
 
-// Retry helper
-async function axiosGetWithRetry(url, options = {}, retries = 3) {
+// Retry helper with better error handling, timeout, and exponential backoff
+async function axiosGetWithRetry(url, options = {}, retries = 5, timeout = 7000) {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      return await axios.get(url, options);
+      return await axios.get(url, { ...options, timeout });
     } catch (err) {
       const status = err.response?.status;
-      if (status === 403 && attempt < retries - 1) {
+      const isRetryable = status === 403 || status === 429 || !status;
+      if (isRetryable && attempt < retries - 1) {
         const delay = 1000 * 2 ** attempt;
-        console.warn(`⚠️ 403 Forbidden from ${url}, retrying in ${delay}ms (attempt ${attempt + 1})`);
+        console.warn(`⚠️ ${status || 'Timeout'} from ${url}, retrying in ${delay}ms (attempt ${attempt + 1})`);
         await new Promise(r => setTimeout(r, delay));
       } else {
         throw err;
@@ -57,6 +58,18 @@ function extractDetailPathFromHtml(html, subjectId, title) {
   return lastMatch || null;
 }
 
+function getCommonHeaders(detailsUrl) {
+  return {
+    'accept': 'application/json',
+    'referer': detailsUrl || 'https://moviebox.ph/',
+    'origin': 'https://moviebox.ph',
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/114.0.0.0 Safari/537.36',
+    'x-client-info': JSON.stringify({ timezone: 'Asia/Manila' }),
+    'x-source': 'h5',
+    'accept-language': 'en-US,en;q=0.9'
+  };
+}
+
 // === MOVIE ROUTE ===
 app.get('/movie/:tmdbId', async (req, res) => {
   const { tmdbId } = req.params;
@@ -81,13 +94,7 @@ app.get('/movie/:tmdbId', async (req, res) => {
 
     const downloadUrl = `https://moviebox.ph/wefeed-h5-bff/web/subject/download?subjectId=${subjectId}&se=0&ep=0`;
     const downloadResp = await axiosGetWithRetry(downloadUrl, {
-      headers: {
-        'accept': 'application/json',
-        'referer': detailsUrl,
-        'user-agent': 'Mozilla/5.0',
-        'x-client-info': JSON.stringify({ timezone: 'Africa/Lagos' }),
-        'x-source': 'h5',
-      }
+      headers: getCommonHeaders(detailsUrl)
     });
 
     res.json({
@@ -130,13 +137,7 @@ app.get('/tv/:tmdbId', async (req, res) => {
 
     const downloadUrl = `https://moviebox.ph/wefeed-h5-bff/web/subject/download?subjectId=${subjectId}&se=0&ep=0`;
     const downloadResp = await axiosGetWithRetry(downloadUrl, {
-      headers: {
-        'accept': 'application/json',
-        'referer': detailsUrl,
-        'user-agent': 'Mozilla/5.0',
-        'x-client-info': JSON.stringify({ timezone: 'Africa/Lagos' }),
-        'x-source': 'h5',
-      }
+      headers: getCommonHeaders(detailsUrl)
     });
 
     res.json({
@@ -179,13 +180,7 @@ app.get('/tv/:tmdbId/:season/:episode', async (req, res) => {
 
     const downloadUrl = `https://moviebox.ph/wefeed-h5-bff/web/subject/download?subjectId=${subjectId}&se=${season}&ep=${episode}`;
     const downloadResp = await axiosGetWithRetry(downloadUrl, {
-      headers: {
-        'accept': 'application/json',
-        'referer': detailsUrl,
-        'user-agent': 'Mozilla/5.0',
-        'x-client-info': JSON.stringify({ timezone: 'Africa/Lagos' }),
-        'x-source': 'h5',
-      }
+      headers: getCommonHeaders(detailsUrl)
     });
 
     res.json({
