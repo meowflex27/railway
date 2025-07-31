@@ -33,7 +33,7 @@ async function axiosGetWithRetry(url, options = {}, retries = 4, timeout = 5000)
       const status = err.response?.status;
       const isRetryable = status === 403 || status === 429 || !status;
       if (isRetryable && attempt < retries - 1) {
-        const delay = Math.min(5000, 1000 * 2 ** attempt);
+        const delay = Math.min(3000, 500 * 2 ** attempt);
         console.warn(`⚠️ ${status || 'Timeout'} from ${url}, retrying in ${delay}ms (attempt ${attempt + 1})`);
         await new Promise(r => setTimeout(r, delay));
       } else {
@@ -73,10 +73,9 @@ function extractDetailPathFromHtml(html, subjectId, title) {
 }
 
 function getCommonHeaders(detailsUrl) {
-  const referer = detailsUrl || 'https://moviebox.ph/';
   return {
     'accept': 'application/json',
-    'referer': referer,
+    'referer': detailsUrl || 'https://moviebox.ph/',
     'origin': 'https://moviebox.ph',
     'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/114.0.0.0 Safari/537.36',
     'x-client-info': JSON.stringify({ timezone: 'Asia/Manila' }),
@@ -111,9 +110,6 @@ async function handleMovieboxFetch(tmdbId, isTV = false, season = 0, episode = 0
   const detailsUrl = detailPath ? `https://moviebox.ph/movies/${detailPath}?id=${subjectId}` : null;
 
   const downloadUrl = `https://moviebox.ph/wefeed-h5-bff/web/subject/download?subjectId=${subjectId}&se=${season}&ep=${episode}`;
-
-  console.log(`📥 Downloading: ${downloadUrl}`);
-
   const downloadResp = await axiosGetWithRetry(downloadUrl, {
     headers: getCommonHeaders(detailsUrl),
     timeout: 4000
