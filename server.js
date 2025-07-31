@@ -8,7 +8,7 @@ const TMDB_API_KEY = 'ea97a714a43a0e3481592c37d2c7178a';
 
 app.use(cors());
 
-// Retry helper for GET requests that handles 403 with backoff
+// Retry helper
 async function axiosGetWithRetry(url, options = {}, retries = 3) {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
@@ -26,16 +26,16 @@ async function axiosGetWithRetry(url, options = {}, retries = 3) {
   }
 }
 
-// === 1. Your original subjectId extractor ===
-function extractSubjectId(html, movieTitle) {
-  const regex = new RegExp(`"(\\d{16,})",\\s*"[^"]*",\\s*"${movieTitle.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}"`, 'i');
+// Extract subjectId from HTML
+function extractSubjectId(html, title) {
+  const regex = new RegExp(`"(\\d{16,})",\\s*"[^"]*",\\s*"${title.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}"`, 'i');
   const match = html.match(regex);
   return match ? match[1] : null;
 }
 
-// === 2. Detail path extractor ===
-function extractDetailPathFromHtml(html, subjectId, movieTitle) {
-  const slug = movieTitle
+// Extract detail path from HTML
+function extractDetailPathFromHtml(html, subjectId, title) {
+  const slug = title
     .trim()
     .toLowerCase()
     .replace(/['’]/g, '')
@@ -45,10 +45,7 @@ function extractDetailPathFromHtml(html, subjectId, movieTitle) {
 
   const idPattern = new RegExp(`"(${subjectId})"`);
   const idMatch = idPattern.exec(html);
-  if (!idMatch) {
-    console.log('❌ subjectId not found in HTML for detailPath extraction');
-    return null;
-  }
+  if (!idMatch) return null;
 
   const before = html.substring(0, idMatch.index);
   const detailPathRegex = new RegExp(`"((?:${slug})[^"]+)"`, 'gi');
@@ -57,13 +54,7 @@ function extractDetailPathFromHtml(html, subjectId, movieTitle) {
     lastMatch = match[1];
   }
 
-  if (lastMatch) {
-    console.log('✅ detailPath found:', lastMatch);
-    return lastMatch;
-  }
-
-  console.log('❌ detailPath not found for subjectId:', subjectId);
-  return null;
+  return lastMatch || null;
 }
 
 // === MOVIE ROUTE ===
@@ -71,55 +62,36 @@ app.get('/movie/:tmdbId', async (req, res) => {
   const { tmdbId } = req.params;
 
   try {
-    console.log('🔎 Fetching TMDb info for:', tmdbId);
     const tmdbResp = await axios.get(`https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}`);
     const title = tmdbResp.data.title;
     const year = tmdbResp.data.release_date?.split('-')[0];
-    console.log('🎬 Title:', title, '| Year:', year);
 
     const searchKeyword = `${title} ${year}`;
     const searchUrl = `https://moviebox.ph/web/searchResult?keyword=${encodeURIComponent(searchKeyword)}`;
-    console.log('🌐 Search URL:', searchUrl);
-
     const searchResp = await axiosGetWithRetry(searchUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
     });
 
     const html = searchResp.data;
-    console.log('📄 HTML fetched, length:', html.length);
-
     const subjectId = extractSubjectId(html, title);
-    console.log('🆔 subjectId:', subjectId);
     if (!subjectId) return res.status(404).json({ error: '❌ subjectId not found in HTML' });
 
     const detailPath = extractDetailPathFromHtml(html, subjectId, title);
     const detailsUrl = detailPath ? `https://moviebox.ph/movies/${detailPath}?id=${subjectId}` : null;
-    console.log('📝 detailPath:', detailPath);
-    console.log('🔗 detailsUrl:', detailsUrl);
 
     const downloadUrl = `https://moviebox.ph/wefeed-h5-bff/web/subject/download?subjectId=${subjectId}&se=0&ep=0`;
     const downloadResp = await axiosGetWithRetry(downloadUrl, {
       headers: {
         'accept': 'application/json',
         'referer': detailsUrl,
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'user-agent': 'Mozilla/5.0',
         'x-client-info': JSON.stringify({ timezone: 'Africa/Lagos' }),
         'x-source': 'h5',
-        // Remove or update cookie header as needed:
-        // 'cookie': [
-        //   '_ga=GA1.1.2113914.1736365446',
-        //   'account=6328836939160473392|0|H5|1744461404|',
-        //   '_ym_uid=1744461405935706898',
-        //   '_ym_d=1744461405',
-        //   'i18n_lang=en',
-        //   '_ga_LF2XQTEPMF=GS2.1.s1751456194$o64$g1$t1751456489$j37$l0$h0'
-        // ].join('; ')
       }
     });
 
-    console.log('✅ Download data fetched');
-
     res.json({
+      type: 'movie',
       title,
       year,
       subjectId,
@@ -134,16 +106,63 @@ app.get('/movie/:tmdbId', async (req, res) => {
   }
 });
 
-// === TV SHOW ROUTE ===
+// === TV SHOW ROUTE (default episode 0x0) ===
+app.get('/tv/:tmdbId', async (req, res) => {
+  const { tmdbId } = req.params;
+
+  try {
+    const tmdbResp = await axios.get(`https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`);
+    const title = tmdbResp.data.name;
+    const year = tmdbResp.data.first_air_date?.split('-')[0];
+
+    const searchKeyword = `${title} ${year}`;
+    const searchUrl = `https://moviebox.ph/web/searchResult?keyword=${encodeURIComponent(searchKeyword)}`;
+    const searchResp = await axiosGetWithRetry(searchUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+    });
+
+    const html = searchResp.data;
+    const subjectId = extractSubjectId(html, title);
+    if (!subjectId) return res.status(404).json({ error: '❌ subjectId not found in HTML' });
+
+    const detailPath = extractDetailPathFromHtml(html, subjectId, title);
+    const detailsUrl = detailPath ? `https://moviebox.ph/movies/${detailPath}?id=${subjectId}` : null;
+
+    const downloadUrl = `https://moviebox.ph/wefeed-h5-bff/web/subject/download?subjectId=${subjectId}&se=0&ep=0`;
+    const downloadResp = await axiosGetWithRetry(downloadUrl, {
+      headers: {
+        'accept': 'application/json',
+        'referer': detailsUrl,
+        'user-agent': 'Mozilla/5.0',
+        'x-client-info': JSON.stringify({ timezone: 'Africa/Lagos' }),
+        'x-source': 'h5',
+      }
+    });
+
+    res.json({
+      type: 'tv',
+      title,
+      year,
+      subjectId,
+      detailPath: detailPath || '❌ Not found',
+      detailsUrl: detailsUrl || '❌ Not available',
+      downloadData: downloadResp.data
+    });
+
+  } catch (err) {
+    console.error('❌ Server error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// === TV SHOW EPISODE ROUTE ===
 app.get('/tv/:tmdbId/:season/:episode', async (req, res) => {
   const { tmdbId, season, episode } = req.params;
 
   try {
-    console.log('🔎 Fetching TMDb TV info for:', tmdbId);
     const tmdbResp = await axios.get(`https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`);
     const title = tmdbResp.data.name;
     const year = tmdbResp.data.first_air_date?.split('-')[0];
-    console.log('📺 Title:', title, '| Year:', year);
 
     const searchKeyword = `${title} ${year}`;
     const searchUrl = `https://moviebox.ph/web/searchResult?keyword=${encodeURIComponent(searchKeyword)}`;
@@ -163,24 +182,14 @@ app.get('/tv/:tmdbId/:season/:episode', async (req, res) => {
       headers: {
         'accept': 'application/json',
         'referer': detailsUrl,
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'user-agent': 'Mozilla/5.0',
         'x-client-info': JSON.stringify({ timezone: 'Africa/Lagos' }),
         'x-source': 'h5',
-        // Remove or update cookie header as needed:
-        // 'cookie': [
-        //   '_ga=GA1.1.2113914.1736365446',
-        //   'account=6328836939160473392|0|H5|1744461404|',
-        //   '_ym_uid=1744461405935706898',
-        //   '_ym_d=1744461405',
-        //   'i18n_lang=en',
-        //   '_ga_LF2XQTEPMF=GS2.1.s1751456194$o64$g1$t1751456489$j37$l0$h0'
-        // ].join('; ')
       }
     });
 
-    console.log('✅ Download data fetched');
-
     res.json({
+      type: 'tv',
       title,
       year,
       subjectId,
