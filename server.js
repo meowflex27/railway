@@ -1,46 +1,30 @@
 import express from 'express';
 import axios from 'axios';
 import cors from 'cors';
-import helmet from 'helmet';
-import compression from 'compression';
-import morgan from 'morgan';
-import rateLimit from 'express-rate-limit';
-import LRU from 'lru-cache';
-import http from 'http';
-import https from 'https';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const TMDB_API_KEY = process.env.TMDB_API_KEY || 'ea97a714a43a0e3481592c37d2c7178a';
+const PORT = 3000;
+const TMDB_API_KEY = 'ea97a714a43a0e3481592c37d2c7178a';
 const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
-// Middleware
 app.use(cors());
-app.use(helmet());
-app.use(compression());
-app.use(morgan('tiny'));
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  standardHeaders: true,
-  legacyHeaders: false
-}));
 
-// Axios keep-alive
-axios.defaults.httpAgent = new http.Agent({ keepAlive: true });
-axios.defaults.httpsAgent = new https.Agent({ keepAlive: true });
-
-// LRU cache
-const cache = new LRU({ max: 1000, ttl: CACHE_TTL });
+const subjectCache = new Map();
 
 function setCache(key, value) {
-  cache.set(key, value);
-}
-function getCache(key) {
-  return cache.get(key);
+  subjectCache.set(key, { data: value, expires: Date.now() + CACHE_TTL });
 }
 
-// Retry helper with exponential backoff
+function getCache(key) {
+  const cached = subjectCache.get(key);
+  if (!cached || cached.expires < Date.now()) {
+    subjectCache.delete(key);
+    return null;
+  }
+  return cached.data;
+}
+
+// Retry helper with capped exponential backoff
 async function axiosGetWithRetry(url, options = {}, retries = 4, timeout = 5000) {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
@@ -49,7 +33,7 @@ async function axiosGetWithRetry(url, options = {}, retries = 4, timeout = 5000)
       const status = err.response?.status;
       const isRetryable = status === 403 || status === 429 || !status;
       if (isRetryable && attempt < retries - 1) {
-        const delay = Math.min(3000, 500 * Math.pow(2, attempt));
+        const delay = Math.min(3000, 500 * 2 ** attempt);
         console.warn(`⚠️ ${status || 'Timeout'} from ${url}, retrying in ${delay}ms (attempt ${attempt + 1})`);
         await new Promise(r => setTimeout(r, delay));
       } else {
@@ -100,6 +84,7 @@ function getCommonHeaders(detailsUrl) {
   };
 }
 
+// === SHARED ROUTE LOGIC ===
 async function handleMovieboxFetch(tmdbId, isTV = false, season = 0, episode = 0) {
   const cacheKey = `${tmdbId}-${season}-${episode}`;
   const cached = getCache(cacheKey);
@@ -144,10 +129,11 @@ async function handleMovieboxFetch(tmdbId, isTV = false, season = 0, episode = 0
   return result;
 }
 
-// Routes
+// === MOVIE ROUTE ===
 app.get('/movie/:tmdbId', async (req, res) => {
   const { tmdbId } = req.params;
   const start = Date.now();
+
   try {
     const result = await handleMovieboxFetch(tmdbId, false, 0, 0);
     console.log(`⏱️ /movie/${tmdbId} responded in ${Date.now() - start}ms`);
@@ -158,9 +144,11 @@ app.get('/movie/:tmdbId', async (req, res) => {
   }
 });
 
+// === TV SHOW ROUTE ===
 app.get('/tv/:tmdbId', async (req, res) => {
   const { tmdbId } = req.params;
   const start = Date.now();
+
   try {
     const result = await handleMovieboxFetch(tmdbId, true, 0, 0);
     console.log(`⏱️ /tv/${tmdbId} responded in ${Date.now() - start}ms`);
@@ -171,9 +159,11 @@ app.get('/tv/:tmdbId', async (req, res) => {
   }
 });
 
+// === TV EPISODE ROUTE ===
 app.get('/tv/:tmdbId/:season/:episode', async (req, res) => {
   const { tmdbId, season, episode } = req.params;
   const start = Date.now();
+
   try {
     const result = await handleMovieboxFetch(tmdbId, true, season, episode);
     console.log(`⏱️ /tv/${tmdbId}/${season}/${episode} responded in ${Date.now() - start}ms`);
@@ -183,9 +173,6 @@ app.get('/tv/:tmdbId/:season/:episode', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-// Health check
-app.get('/health', (_, res) => res.send('OK'));
 
 // Start server
 app.listen(PORT, () => {
