@@ -26,32 +26,11 @@ async function axiosGetWithRetry(url, options = {}, retries = 3) {
   }
 }
 
-// === Normalize and Fuzzy Match ===
-function normalizeTitle(title) {
-  return title
-    .toLowerCase()
-    .replace(/['’"]/g, '')
-    .replace(/&/g, 'and')
-    .replace(/[^a-z0-9]/g, '')
-    .trim();
-}
-
-// Updated subjectId extractor using fuzzy matching
-function extractSubjectId(html, tmdbTitle) {
-  const normalizedTarget = normalizeTitle(tmdbTitle);
-
-  const regex = /"(\d{16,})",\s*"[^"]*",\s*"([^"]+)"/g;
-  let match;
-  while ((match = regex.exec(html)) !== null) {
-    const id = match[1];
-    const candidateTitle = match[2];
-    const normalizedCandidate = normalizeTitle(candidateTitle);
-
-    if (normalizedCandidate.includes(normalizedTarget) || normalizedTarget.includes(normalizedCandidate)) {
-      return id;
-    }
-  }
-  return null;
+// Extract subjectId from HTML
+function extractSubjectId(html, title) {
+  const regex = new RegExp(`"(\\d{16,})",\\s*"[^"]*",\\s*"${title.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}"`, 'i');
+  const match = html.match(regex);
+  return match ? match[1] : null;
 }
 
 // Extract detail path from HTML
