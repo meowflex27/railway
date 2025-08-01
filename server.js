@@ -1,3 +1,6 @@
+railway::
+
+
 import express from 'express';
 import axios from 'axios';
 import cors from 'cors';
@@ -10,11 +13,11 @@ const CACHE_TTL = 10 * 60 * 1000;
 app.use(cors());
 const subjectCache = new Map();
 
-function setCache(key: string, value: any) {
+function setCache(key, value) {
   subjectCache.set(key, { data: value, expires: Date.now() + CACHE_TTL });
 }
 
-function getCache(key: string) {
+function getCache(key) {
   const cached = subjectCache.get(key);
   if (!cached || cached.expires < Date.now()) {
     subjectCache.delete(key);
@@ -23,11 +26,11 @@ function getCache(key: string) {
   return cached.data;
 }
 
-async function axiosGetWithRetry(url: string, options = {}, retries = 4, timeout = 5000) {
+async function axiosGetWithRetry(url, options = {}, retries = 4, timeout = 5000) {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
       return await axios.get(url, { ...options, timeout });
-    } catch (err: any) {
+    } catch (err) {
       const status = err.response?.status;
       const isRetryable = status === 403 || status === 429 || !status;
       if (isRetryable && attempt < retries - 1) {
@@ -41,7 +44,8 @@ async function axiosGetWithRetry(url: string, options = {}, retries = 4, timeout
   }
 }
 
-function extractSubjectId(html: string, title: string) {
+// 🔧 Updated extractSubjectId with fuzzy matching
+function extractSubjectId(html, title) {
   const rows = [...html.matchAll(/"(\d{16,})",\s*"[^"]*",\s*"([^"]+)"/g)];
   const cleanedTitle = title.toLowerCase().replace(/[^a-z0-9]/gi, '');
 
@@ -50,18 +54,12 @@ function extractSubjectId(html: string, title: string) {
     if (cleanedCandidate.includes(cleanedTitle) || cleanedTitle.includes(cleanedCandidate)) {
       return id;
     }
-
-    let matchCount = 0;
-    for (let c of cleanedCandidate) {
-      if (cleanedTitle.includes(c)) matchCount++;
-    }
-    if (matchCount / cleanedCandidate.length >= 0.6) return id;
   }
 
   return null;
 }
 
-function extractDetailPathFromHtml(html: string, subjectId: string, title: string) {
+function extractDetailPathFromHtml(html, subjectId, title) {
   const slug = title
     .trim()
     .toLowerCase()
@@ -76,7 +74,7 @@ function extractDetailPathFromHtml(html: string, subjectId: string, title: strin
 
   const before = html.substring(0, idMatch.index);
   const detailPathRegex = new RegExp(`"((?:${slug})[^"]+)"`, 'gi');
-  let match: RegExpExecArray | null, lastMatch: string | null = null;
+  let match, lastMatch = null;
   while ((match = detailPathRegex.exec(before)) !== null) {
     lastMatch = match[1];
   }
@@ -84,7 +82,7 @@ function extractDetailPathFromHtml(html: string, subjectId: string, title: strin
   return lastMatch || null;
 }
 
-function getCommonHeaders(detailsUrl?: string) {
+function getCommonHeaders(detailsUrl) {
   return {
     accept: 'application/json',
     referer: detailsUrl || 'https://moviebox.ph/',
@@ -96,60 +94,29 @@ function getCommonHeaders(detailsUrl?: string) {
   };
 }
 
-async function getAlternativeTitles(tmdbId: string, isTV: boolean): Promise<string[]> {
-  const url = `https://api.themoviedb.org/3/${isTV ? 'tv' : 'movie'}/${tmdbId}/alternative_titles?api_key=${TMDB_API_KEY}`;
-  try {
-    const resp = await axios.get(url);
-    const titles = isTV ? (resp.data.results || []) : (resp.data.titles || []);
-    return titles.map((t: any) => t.title || t.name).filter(Boolean);
-  } catch (e) {
-    console.warn(`⚠️ Failed to fetch alternative titles for ${tmdbId}`);
-    return [];
-  }
-}
-
-async function handleMovieboxFetch(tmdbId: string, isTV = false, season = 0, episode = 0) {
-  season = parseInt(season as any);
-  episode = parseInt(episode as any);
-
+// Core fetch handler
+async function handleMovieboxFetch(tmdbId, isTV = false, season = 0, episode = 0) {
   const cacheKey = `${tmdbId}-${season}-${episode}`;
   const cached = getCache(cacheKey);
   if (cached) return cached;
 
   const tmdbUrl = `https://api.themoviedb.org/3/${isTV ? 'tv' : 'movie'}/${tmdbId}?api_key=${TMDB_API_KEY}`;
   const tmdbResp = await axios.get(tmdbUrl);
-  const baseTitle = isTV ? tmdbResp.data.name : tmdbResp.data.title;
+  const title = isTV ? tmdbResp.data.name : tmdbResp.data.title;
   const year = (isTV ? tmdbResp.data.first_air_date : tmdbResp.data.release_date)?.split('-')[0];
 
-  const altTitles = await getAlternativeTitles(tmdbId, isTV);
-  const allTitles = [baseTitle, ...altTitles];
+  const searchKeyword = `${title} ${year}`;
+  const searchUrl = `https://moviebox.ph/web/searchResult?keyword=${encodeURIComponent(searchKeyword)}`;
+  const searchResp = await axiosGetWithRetry(searchUrl, {
+    headers: { 'User-Agent': 'Mozilla/5.0' }
+  });
 
-  let subjectId = null;
-  let html = null;
-  let usedTitle = baseTitle;
-  let detailPath = null;
-  let detailsUrl = null;
+  const html = searchResp.data;
+  const subjectId = extractSubjectId(html, title);
+  if (!subjectId) throw new Error('❌ subjectId not found');
 
-  for (const title of allTitles) {
-    const searchKeyword = `${title} ${year}`;
-    const searchUrl = `https://moviebox.ph/web/searchResult?keyword=${encodeURIComponent(searchKeyword)}`;
-    const searchResp = await axiosGetWithRetry(searchUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-
-    html = searchResp.data;
-    subjectId = extractSubjectId(html, title);
-    if (subjectId) {
-      usedTitle = title;
-      detailPath = extractDetailPathFromHtml(html, subjectId, title);
-      detailsUrl = detailPath
-        ? `https://moviebox.ph/movies/${detailPath}?id=${subjectId}`
-        : `https://moviebox.ph/?id=${subjectId}`;
-      break;
-    }
-  }
-
-  if (!subjectId) throw new Error(`❌ subjectId not found for "${baseTitle}" or alternates`);
+  const detailPath = extractDetailPathFromHtml(html, subjectId, title);
+  const detailsUrl = detailPath ? `https://moviebox.ph/movies/${detailPath}?id=${subjectId}` : null;
 
   const downloadUrl = `https://moviebox.ph/wefeed-h5-bff/web/subject/download?subjectId=${subjectId}&se=${season}&ep=${episode}`;
   const downloadResp = await axiosGetWithRetry(downloadUrl, {
@@ -158,12 +125,11 @@ async function handleMovieboxFetch(tmdbId: string, isTV = false, season = 0, epi
 
   const result = {
     type: isTV ? 'tv' : 'movie',
-    title: usedTitle,
+    title,
     year,
     subjectId,
     detailPath: detailPath || '❌ Not found',
     detailsUrl: detailsUrl || '❌ Not available',
-    hasResource: !!downloadResp.data?.data?.hasResource,
     downloadData: downloadResp.data
   };
 
@@ -179,8 +145,7 @@ app.get('/movie/:tmdbId', async (req, res) => {
     const result = await handleMovieboxFetch(req.params.tmdbId, false, 0, 0);
     console.log(`⏱️ /movie/${req.params.tmdbId} responded in ${Date.now() - start}ms`);
     res.json(result);
-  } catch (err: any) {
-    console.error(`❌ Error for /movie/${req.params.tmdbId}:`, err.message);
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -191,8 +156,7 @@ app.get('/tv/:tmdbId', async (req, res) => {
     const result = await handleMovieboxFetch(req.params.tmdbId, true, 0, 0);
     console.log(`⏱️ /tv/${req.params.tmdbId} responded in ${Date.now() - start}ms`);
     res.json(result);
-  } catch (err: any) {
-    console.error(`❌ Error for /tv/${req.params.tmdbId}:`, err.message);
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -201,17 +165,16 @@ app.get('/tv/:tmdbId/:season/:episode', async (req, res) => {
   const { tmdbId, season, episode } = req.params;
   const start = Date.now();
   try {
-    const result = await handleMovieboxFetch(tmdbId, true, parseInt(season), parseInt(episode));
+    const result = await handleMovieboxFetch(tmdbId, true, season, episode);
     console.log(`⏱️ /tv/${tmdbId}/${season}/${episode} responded in ${Date.now() - start}ms`);
     res.json(result);
-  } catch (err: any) {
-    console.error(`❌ Error for /tv/${tmdbId}/${season}/${episode}:`, err.message);
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 app.get('/all-moviebox-movies', async (req, res) => {
-  const page = parseInt(req.query.page as string) || 1;
+  const page = parseInt(req.query.page) || 1;
   const url = `https://moviebox.ph/wefeed-h5-bff/web/homepage/recommendSubject?page=${page}&pageSize=100`;
 
   try {
@@ -219,8 +182,7 @@ app.get('/all-moviebox-movies', async (req, res) => {
       headers: getCommonHeaders()
     });
     res.json({ page, data: response.data });
-  } catch (err: any) {
-    console.error('❌ Error fetching movie list:', err.message);
+  } catch (err) {
     res.status(500).json({ error: 'Failed to fetch movie list', details: err.message });
   }
 });
