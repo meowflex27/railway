@@ -1,4 +1,3 @@
-// server.js
 import express from 'express';
 import axios from 'axios';
 import cors from 'cors';
@@ -42,11 +41,19 @@ async function axiosGetWithRetry(url, options = {}, retries = 4, timeout = 5000)
   }
 }
 
+// 🔧 Updated extractSubjectId with fuzzy matching
 function extractSubjectId(html, title) {
-  const escaped = title.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-  const regex = new RegExp(`"(\\d{16,})",\\s*"[^"]*",\\s*"${escaped}"`, 'i');
-  const match = html.match(regex);
-  return match ? match[1] : null;
+  const rows = [...html.matchAll(/"(\d{16,})",\s*"[^"]*",\s*"([^"]+)"/g)];
+  const cleanedTitle = title.toLowerCase().replace(/[^a-z0-9]/gi, '');
+
+  for (const [, id, candidateTitle] of rows) {
+    const cleanedCandidate = candidateTitle.toLowerCase().replace(/[^a-z0-9]/gi, '');
+    if (cleanedCandidate.includes(cleanedTitle) || cleanedTitle.includes(cleanedCandidate)) {
+      return id;
+    }
+  }
+
+  return null;
 }
 
 function extractDetailPathFromHtml(html, subjectId, title) {
@@ -129,7 +136,6 @@ async function handleMovieboxFetch(tmdbId, isTV = false, season = 0, episode = 0
 
 // === ROUTES ===
 
-// Movie info from TMDB and Moviebox
 app.get('/movie/:tmdbId', async (req, res) => {
   const start = Date.now();
   try {
@@ -141,7 +147,6 @@ app.get('/movie/:tmdbId', async (req, res) => {
   }
 });
 
-// TV show root
 app.get('/tv/:tmdbId', async (req, res) => {
   const start = Date.now();
   try {
@@ -153,7 +158,6 @@ app.get('/tv/:tmdbId', async (req, res) => {
   }
 });
 
-// TV show episode
 app.get('/tv/:tmdbId/:season/:episode', async (req, res) => {
   const { tmdbId, season, episode } = req.params;
   const start = Date.now();
@@ -166,7 +170,6 @@ app.get('/tv/:tmdbId/:season/:episode', async (req, res) => {
   }
 });
 
-// NEW: List all available movies from MovieBox.ph
 app.get('/all-moviebox-movies', async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const url = `https://moviebox.ph/wefeed-h5-bff/web/homepage/recommendSubject?page=${page}&pageSize=100`;
@@ -181,7 +184,6 @@ app.get('/all-moviebox-movies', async (req, res) => {
   }
 });
 
-// Server start
 app.listen(PORT, () => {
   console.log(`🚀 Server is running on http://localhost:${PORT}`);
 });
