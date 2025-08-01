@@ -1,136 +1,230 @@
 import express from 'express';
 import axios from 'axios';
 import cors from 'cors';
-import cheerio from 'cheerio';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const TMDB_API_KEY = 'ea97a714a43a0e3481592c37d2c7178a';
-const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
-const subjectCache = new Map();
+const CACHE_TTL = 10 * 60 * 1000;
 
 app.use(cors());
+const subjectCache = new Map();
 
-app.get('/api/moviebox', async (req, res) => {
-  const { id, type = 'movie' } = req.query;
+function setCache(key: string, value: any) {
+  subjectCache.set(key, { data: value, expires: Date.now() + CACHE_TTL });
+}
 
-  if (!id || isNaN(Number(id))) {
-    res.status(400).json({ error: 'Invalid or missing TMDB ID' });
-    return;
+function getCache(key: string) {
+  const cached = subjectCache.get(key);
+  if (!cached || cached.expires < Date.now()) {
+    subjectCache.delete(key);
+    return null;
   }
+  return cached.data;
+}
 
-  try {
-    const cacheKey = `${type}-${id}`;
-    if (subjectCache.has(cacheKey)) {
-      const cached = subjectCache.get(cacheKey);
-      if (Date.now() - cached.timestamp < CACHE_TTL) {
-        return res.json(cached.data);
+async function axiosGetWithRetry(url: string, options = {}, retries = 4, timeout = 5000) {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      return await axios.get(url, { ...options, timeout });
+    } catch (err: any) {
+      const status = err.response?.status;
+      const isRetryable = status === 403 || status === 429 || !status;
+      if (isRetryable && attempt < retries - 1) {
+        const delay = Math.min(3000, 500 * 2 ** attempt);
+        console.warn(`⚠️ ${status || 'Timeout'} from ${url}, retrying in ${delay}ms (attempt ${attempt + 1})`);
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        throw err;
       }
     }
+  }
+}
 
-    const tmdbRes = await axios.get(`https://api.themoviedb.org/3/${type}/${id}?api_key=${TMDB_API_KEY}&language=en-US`);
-    const { title, name, release_date, first_air_date } = tmdbRes.data;
-    const year = (release_date || first_air_date || '').split('-')[0];
-    const searchTitle = title || name;
+function extractSubjectId(html: string, title: string) {
+  const rows = [...html.matchAll(/"(\d{16,})",\s*"[^"]*",\s*"([^"]+)"/g)];
+  const cleanedTitle = title.toLowerCase().replace(/[^a-z0-9]/gi, '');
 
-    const subjectId = await getSubjectId(searchTitle, year);
-    if (!subjectId) {
-      return res.json({
-        type,
-        title: searchTitle,
-        year,
-        subjectId: null,
-        detailPath: '❌ Not found',
-        detailsUrl: null,
-        hasResource: false,
-        downloadData: null
-      });
+  for (const [, id, candidateTitle] of rows) {
+    const cleanedCandidate = candidateTitle.toLowerCase().replace(/[^a-z0-9]/gi, '');
+    if (cleanedCandidate.includes(cleanedTitle) || cleanedTitle.includes(cleanedCandidate)) {
+      return id;
     }
 
-    const html = await fetchMovieboxHTML(subjectId);
-    const detailPath = extractDetailPathFromHtml(html, subjectId);
-
-    let downloadData = null;
-    let hasResource = false;
-
-    if (detailPath) {
-      downloadData = await fetchDownloadData(subjectId);
-      hasResource = downloadData?.data?.hasResource || false;
+    let matchCount = 0;
+    for (let c of cleanedCandidate) {
+      if (cleanedTitle.includes(c)) matchCount++;
     }
+    if (matchCount / cleanedCandidate.length >= 0.6) return id;
+  }
 
-    const data = {
-      type,
-      title: searchTitle,
-      year,
-      subjectId,
-      detailPath: detailPath || '❌ Not found',
-      detailsUrl: detailPath
+  return null;
+}
+
+function extractDetailPathFromHtml(html: string, subjectId: string, title: string) {
+  const slug = title
+    .trim()
+    .toLowerCase()
+    .replace(/['’]/g, '')
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') + '-';
+
+  const idPattern = new RegExp(`"(${subjectId})"`);
+  const idMatch = idPattern.exec(html);
+  if (!idMatch) return null;
+
+  const before = html.substring(0, idMatch.index);
+  const detailPathRegex = new RegExp(`"((?:${slug})[^"]+)"`, 'gi');
+  let match: RegExpExecArray | null, lastMatch: string | null = null;
+  while ((match = detailPathRegex.exec(before)) !== null) {
+    lastMatch = match[1];
+  }
+
+  return lastMatch || null;
+}
+
+function getCommonHeaders(detailsUrl?: string) {
+  return {
+    accept: 'application/json',
+    referer: detailsUrl || 'https://moviebox.ph/',
+    origin: 'https://moviebox.ph',
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/114.0.0.0 Safari/537.36',
+    'x-client-info': JSON.stringify({ timezone: 'Asia/Manila' }),
+    'x-source': 'h5',
+    'accept-language': 'en-US,en;q=0.9'
+  };
+}
+
+async function getAlternativeTitles(tmdbId: string, isTV: boolean): Promise<string[]> {
+  const url = `https://api.themoviedb.org/3/${isTV ? 'tv' : 'movie'}/${tmdbId}/alternative_titles?api_key=${TMDB_API_KEY}`;
+  try {
+    const resp = await axios.get(url);
+    const titles = isTV ? (resp.data.results || []) : (resp.data.titles || []);
+    return titles.map((t: any) => t.title || t.name).filter(Boolean);
+  } catch (e) {
+    console.warn(`⚠️ Failed to fetch alternative titles for ${tmdbId}`);
+    return [];
+  }
+}
+
+async function handleMovieboxFetch(tmdbId: string, isTV = false, season = 0, episode = 0) {
+  season = parseInt(season as any);
+  episode = parseInt(episode as any);
+
+  const cacheKey = `${tmdbId}-${season}-${episode}`;
+  const cached = getCache(cacheKey);
+  if (cached) return cached;
+
+  const tmdbUrl = `https://api.themoviedb.org/3/${isTV ? 'tv' : 'movie'}/${tmdbId}?api_key=${TMDB_API_KEY}`;
+  const tmdbResp = await axios.get(tmdbUrl);
+  const baseTitle = isTV ? tmdbResp.data.name : tmdbResp.data.title;
+  const year = (isTV ? tmdbResp.data.first_air_date : tmdbResp.data.release_date)?.split('-')[0];
+
+  const altTitles = await getAlternativeTitles(tmdbId, isTV);
+  const allTitles = [baseTitle, ...altTitles];
+
+  let subjectId = null;
+  let html = null;
+  let usedTitle = baseTitle;
+  let detailPath = null;
+  let detailsUrl = null;
+
+  for (const title of allTitles) {
+    const searchKeyword = `${title} ${year}`;
+    const searchUrl = `https://moviebox.ph/web/searchResult?keyword=${encodeURIComponent(searchKeyword)}`;
+    const searchResp = await axiosGetWithRetry(searchUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+
+    html = searchResp.data;
+    subjectId = extractSubjectId(html, title);
+    if (subjectId) {
+      usedTitle = title;
+      detailPath = extractDetailPathFromHtml(html, subjectId, title);
+      detailsUrl = detailPath
         ? `https://moviebox.ph/movies/${detailPath}?id=${subjectId}`
-        : `https://moviebox.ph/?id=${subjectId}`,
-      hasResource,
-      downloadData
-    };
+        : `https://moviebox.ph/?id=${subjectId}`;
+      break;
+    }
+  }
 
-    subjectCache.set(cacheKey, { data, timestamp: Date.now() });
-    res.json(data);
+  if (!subjectId) throw new Error(`❌ subjectId not found for "${baseTitle}" or alternates`);
 
-  } catch (err) {
-    console.error('Fetch error:', err.message);
-    res.status(500).json({ error: 'Internal server error' });
+  const downloadUrl = `https://moviebox.ph/wefeed-h5-bff/web/subject/download?subjectId=${subjectId}&se=${season}&ep=${episode}`;
+  const downloadResp = await axiosGetWithRetry(downloadUrl, {
+    headers: getCommonHeaders(detailsUrl)
+  });
+
+  const result = {
+    type: isTV ? 'tv' : 'movie',
+    title: usedTitle,
+    year,
+    subjectId,
+    detailPath: detailPath || '❌ Not found',
+    detailsUrl: detailsUrl || '❌ Not available',
+    hasResource: !!downloadResp.data?.data?.hasResource,
+    downloadData: downloadResp.data
+  };
+
+  setCache(cacheKey, result);
+  return result;
+}
+
+// === ROUTES ===
+
+app.get('/movie/:tmdbId', async (req, res) => {
+  const start = Date.now();
+  try {
+    const result = await handleMovieboxFetch(req.params.tmdbId, false, 0, 0);
+    console.log(`⏱️ /movie/${req.params.tmdbId} responded in ${Date.now() - start}ms`);
+    res.json(result);
+  } catch (err: any) {
+    console.error(`❌ Error for /movie/${req.params.tmdbId}:`, err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 🔎 Moviebox Search Helper
-async function getSubjectId(title: string, year?: string): Promise<string | null> {
-  const encoded = encodeURIComponent(title);
-  const url = `https://moviebox.ph/api/search?keyword=${encoded}`;
+app.get('/tv/:tmdbId', async (req, res) => {
+  const start = Date.now();
   try {
-    const res = await axios.get(url);
-    const allResults = res.data?.data?.all || [];
-    const match = allResults.find((item: any) => {
-      return item?.title?.toLowerCase() === title.toLowerCase() &&
-        (!year || item?.year?.toString() === year.toString());
-    });
-    return match?.id || null;
-  } catch (e) {
-    console.warn('Subject ID lookup failed');
-    return null;
+    const result = await handleMovieboxFetch(req.params.tmdbId, true, 0, 0);
+    console.log(`⏱️ /tv/${req.params.tmdbId} responded in ${Date.now() - start}ms`);
+    res.json(result);
+  } catch (err: any) {
+    console.error(`❌ Error for /tv/${req.params.tmdbId}:`, err.message);
+    res.status(500).json({ error: err.message });
   }
-}
+});
 
-// 🧠 Extract Detail Path Using cheerio + subjectId
-function extractDetailPathFromHtml(html: string, subjectId: string): string | null {
-  const $ = cheerio.load(html);
-  let foundPath: string | null = null;
+app.get('/tv/:tmdbId/:season/:episode', async (req, res) => {
+  const { tmdbId, season, episode } = req.params;
+  const start = Date.now();
+  try {
+    const result = await handleMovieboxFetch(tmdbId, true, parseInt(season), parseInt(episode));
+    console.log(`⏱️ /tv/${tmdbId}/${season}/${episode} responded in ${Date.now() - start}ms`);
+    res.json(result);
+  } catch (err: any) {
+    console.error(`❌ Error for /tv/${tmdbId}/${season}/${episode}:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-  $('a[href]').each((_, el) => {
-    const href = $(el).attr('href');
-    if (href && href.includes('/movies/') && href.includes(subjectId)) {
-      const match = href.match(/\/movies\/([^?]+)/);
-      if (match && match[1]) {
-        foundPath = match[1];
-        return false; // break loop
-      }
-    }
-  });
+app.get('/all-moviebox-movies', async (req, res) => {
+  const page = parseInt(req.query.page as string) || 1;
+  const url = `https://moviebox.ph/wefeed-h5-bff/web/homepage/recommendSubject?page=${page}&pageSize=100`;
 
-  return foundPath;
-}
-
-// 🔽 Fetch HTML page by subjectId
-async function fetchMovieboxHTML(subjectId: string): Promise<string> {
-  const url = `https://moviebox.ph/?id=${subjectId}`;
-  const res = await axios.get(url);
-  return res.data;
-}
-
-// 📥 Download resource info
-async function fetchDownloadData(subjectId: string): Promise<any> {
-  const url = `https://moviebox.ph/api/resource/list?subjectId=${subjectId}`;
-  const res = await axios.get(url);
-  return res.data;
-}
+  try {
+    const response = await axiosGetWithRetry(url, {
+      headers: getCommonHeaders()
+    });
+    res.json({ page, data: response.data });
+  } catch (err: any) {
+    console.error('❌ Error fetching movie list:', err.message);
+    res.status(500).json({ error: 'Failed to fetch movie list', details: err.message });
+  }
+});
 
 app.listen(PORT, () => {
-  console.log(`✅ Server running at http://localhost:${PORT}`);
+  console.log(`🚀 Server is running on http://localhost:${PORT}`);
 });
