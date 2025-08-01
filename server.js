@@ -1,14 +1,14 @@
+// server.js
 import express from 'express';
 import axios from 'axios';
 import cors from 'cors';
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 const TMDB_API_KEY = 'ea97a714a43a0e3481592c37d2c7178a';
-const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+const CACHE_TTL = 10 * 60 * 1000;
 
 app.use(cors());
-
 const subjectCache = new Map();
 
 function setCache(key, value) {
@@ -24,7 +24,6 @@ function getCache(key) {
   return cached.data;
 }
 
-// Retry helper with capped exponential backoff
 async function axiosGetWithRetry(url, options = {}, retries = 4, timeout = 5000) {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
@@ -44,7 +43,8 @@ async function axiosGetWithRetry(url, options = {}, retries = 4, timeout = 5000)
 }
 
 function extractSubjectId(html, title) {
-  const regex = new RegExp(`"(\\d{16,})",\\s*"[^"]*",\\s*"${title.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}"`, 'i');
+  const escaped = title.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+  const regex = new RegExp(`"(\\d{16,})",\\s*"[^"]*",\\s*"${escaped}"`, 'i');
   const match = html.match(regex);
   return match ? match[1] : null;
 }
@@ -74,9 +74,9 @@ function extractDetailPathFromHtml(html, subjectId, title) {
 
 function getCommonHeaders(detailsUrl) {
   return {
-    'accept': 'application/json',
-    'referer': detailsUrl || 'https://moviebox.ph/',
-    'origin': 'https://moviebox.ph',
+    accept: 'application/json',
+    referer: detailsUrl || 'https://moviebox.ph/',
+    origin: 'https://moviebox.ph',
     'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/114.0.0.0 Safari/537.36',
     'x-client-info': JSON.stringify({ timezone: 'Asia/Manila' }),
     'x-source': 'h5',
@@ -84,7 +84,7 @@ function getCommonHeaders(detailsUrl) {
   };
 }
 
-// === SHARED ROUTE LOGIC ===
+// Core fetch handler
 async function handleMovieboxFetch(tmdbId, isTV = false, season = 0, episode = 0) {
   const cacheKey = `${tmdbId}-${season}-${episode}`;
   const cached = getCache(cacheKey);
@@ -98,21 +98,19 @@ async function handleMovieboxFetch(tmdbId, isTV = false, season = 0, episode = 0
   const searchKeyword = `${title} ${year}`;
   const searchUrl = `https://moviebox.ph/web/searchResult?keyword=${encodeURIComponent(searchKeyword)}`;
   const searchResp = await axiosGetWithRetry(searchUrl, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-    timeout: 5000
+    headers: { 'User-Agent': 'Mozilla/5.0' }
   });
 
   const html = searchResp.data;
   const subjectId = extractSubjectId(html, title);
-  if (!subjectId) throw new Error('❌ subjectId not found in HTML');
+  if (!subjectId) throw new Error('❌ subjectId not found');
 
   const detailPath = extractDetailPathFromHtml(html, subjectId, title);
   const detailsUrl = detailPath ? `https://moviebox.ph/movies/${detailPath}?id=${subjectId}` : null;
 
   const downloadUrl = `https://moviebox.ph/wefeed-h5-bff/web/subject/download?subjectId=${subjectId}&se=${season}&ep=${episode}`;
   const downloadResp = await axiosGetWithRetry(downloadUrl, {
-    headers: getCommonHeaders(detailsUrl),
-    timeout: 4000
+    headers: getCommonHeaders(detailsUrl)
   });
 
   const result = {
@@ -129,52 +127,61 @@ async function handleMovieboxFetch(tmdbId, isTV = false, season = 0, episode = 0
   return result;
 }
 
-// === MOVIE ROUTE ===
+// === ROUTES ===
+
+// Movie info from TMDB and Moviebox
 app.get('/movie/:tmdbId', async (req, res) => {
-  const { tmdbId } = req.params;
   const start = Date.now();
-
   try {
-    const result = await handleMovieboxFetch(tmdbId, false, 0, 0);
-    console.log(`⏱️ /movie/${tmdbId} responded in ${Date.now() - start}ms`);
+    const result = await handleMovieboxFetch(req.params.tmdbId, false, 0, 0);
+    console.log(`⏱️ /movie/${req.params.tmdbId} responded in ${Date.now() - start}ms`);
     res.json(result);
   } catch (err) {
-    console.error('❌ Movie fetch error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// === TV SHOW ROUTE ===
+// TV show root
 app.get('/tv/:tmdbId', async (req, res) => {
-  const { tmdbId } = req.params;
   const start = Date.now();
-
   try {
-    const result = await handleMovieboxFetch(tmdbId, true, 0, 0);
-    console.log(`⏱️ /tv/${tmdbId} responded in ${Date.now() - start}ms`);
+    const result = await handleMovieboxFetch(req.params.tmdbId, true, 0, 0);
+    console.log(`⏱️ /tv/${req.params.tmdbId} responded in ${Date.now() - start}ms`);
     res.json(result);
   } catch (err) {
-    console.error('❌ TV show fetch error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// === TV EPISODE ROUTE ===
+// TV show episode
 app.get('/tv/:tmdbId/:season/:episode', async (req, res) => {
   const { tmdbId, season, episode } = req.params;
   const start = Date.now();
-
   try {
     const result = await handleMovieboxFetch(tmdbId, true, season, episode);
     console.log(`⏱️ /tv/${tmdbId}/${season}/${episode} responded in ${Date.now() - start}ms`);
     res.json(result);
   } catch (err) {
-    console.error('❌ TV episode fetch error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Start server
+// NEW: List all available movies from MovieBox.ph
+app.get('/all-moviebox-movies', async (req, res) => {
+  const page = parseInt(req.query.page) || 1;
+  const url = `https://moviebox.ph/wefeed-h5-bff/web/homepage/recommendSubject?page=${page}&pageSize=100`;
+
+  try {
+    const response = await axiosGetWithRetry(url, {
+      headers: getCommonHeaders()
+    });
+    res.json({ page, data: response.data });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch movie list', details: err.message });
+  }
+});
+
+// Server start
 app.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
+  console.log(`🚀 Server is running on http://localhost:${PORT}`);
 });
